@@ -434,6 +434,10 @@ llmfit fit --perfect -n 5
 # Show detected system specs
 llmfit system
 
+# Hardware diagnostic report for bug reports (raw nvidia-smi/rocm-smi/sysfs
+# output + what llmfit detected) — paste into a GitHub issue
+llmfit doctor
+
 # List all models in the database
 llmfit list
 

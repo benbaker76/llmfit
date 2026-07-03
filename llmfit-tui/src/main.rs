@@ -204,6 +204,31 @@ AGENT USAGE:
   gpu_backend, unified_memory, os } }")]
     System,
 
+    /// Print a hardware diagnostic report for bug reports
+    #[command(long_about = "\
+Print a hardware diagnostic report for GitHub bug reports.
+
+Captures the raw output of every external tool GPU detection shells out to
+(nvidia-smi, rocm-smi, sysfs, lspci, system_profiler, WMI, vulkaninfo,
+npu-smi) alongside what llmfit actually detected, so detection bugs can be
+reproduced — and turned into regression tests — from the report alone.
+
+PRECONDITIONS:
+  None. Missing tools are reported as unavailable, which is itself useful.
+
+SIDE EFFECTS:
+  None — read-only. Output contains hardware model names and driver info
+  only; no hostnames, usernames, or serial numbers.
+
+EXIT CODES:
+  0  Success
+
+AGENT USAGE:
+  llmfit doctor > llmfit-doctor.md
+
+  Output is Markdown; attach or paste it into a GitHub issue.")]
+    Doctor,
+
     /// Generate a Kubernetes DRA ResourceClaim encoding the model's fit
     #[command(long_about = "\
 Generate a Kubernetes DRA ResourceClaim (or ResourceClaimTemplate) whose CEL
@@ -2559,6 +2584,13 @@ fn main() {
                 } else {
                     specs.display();
                 }
+            }
+
+            Commands::Doctor => {
+                print!(
+                    "{}",
+                    llmfit_core::doctor::collect_diagnostics(env!("CARGO_PKG_VERSION"))
+                );
             }
 
             Commands::Claim {
