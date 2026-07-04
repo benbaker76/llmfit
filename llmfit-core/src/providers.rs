@@ -2125,10 +2125,10 @@ fn lmstudio_find_gguf_url(hf_name: &str) -> Option<String> {
     let budget_gb = system_ram_gb * 0.85;
 
     // Try known mappings first
-    if let Some(repo) = lookup_gguf_repo(hf_name) {
-        if let Some(url) = try_gguf_repo(repo, budget_gb) {
-            return Some(url);
-        }
+    if let Some(repo) = lookup_gguf_repo(hf_name)
+        && let Some(url) = try_gguf_repo(repo, budget_gb)
+    {
+        return Some(url);
     }
 
     // Try heuristic candidates (bartowski/, ggml-org/, TheBloke/)
@@ -2139,10 +2139,10 @@ fn lmstudio_find_gguf_url(hf_name: &str) -> Option<String> {
     }
 
     // Try the base repo itself (some repos host GGUF directly)
-    if hf_name.contains('/') {
-        if let Some(url) = try_gguf_repo(hf_name, budget_gb) {
-            return Some(url);
-        }
+    if hf_name.contains('/')
+        && let Some(url) = try_gguf_repo(hf_name, budget_gb)
+    {
+        return Some(url);
     }
 
     None
