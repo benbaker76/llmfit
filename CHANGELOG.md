@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.38](https://github.com/AlexsJones/llmfit/compare/v0.9.37...v0.9.38) (2026-07-04)
+
+
+### Bug Fixes
+
+* **docker:** drop COPY of removed root data/ directory ([a4445c7](https://github.com/AlexsJones/llmfit/commit/a4445c70885ee399a5b8e39b4ded938a09230064))
+* **docker:** drop COPY of removed root data/ directory ([5bb514d](https://github.com/AlexsJones/llmfit/commit/5bb514d130964311617269b0cffd4663a31522e3))
+
 ## [0.9.37](https://github.com/AlexsJones/llmfit/compare/v0.9.36...v0.9.37) (2026-07-03)
 
 
