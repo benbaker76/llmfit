@@ -826,6 +826,16 @@ def infer_languages(info: dict | None, config: dict | None) -> list[str]:
                 values.append((val, True))
     values.extend((tag, False) for tag in (info or {}).get("tags", []))
 
+    # Meta MMS per-language models (facebook/mms-tts-eng, facebook/mms-tts-deu,
+    # ...) declare no language metadata via the API; the target language is
+    # only encoded as an ISO-639-3 suffix in the repo name.
+    repo_id = (info or {}).get("id", "") or (info or {}).get("modelId", "")
+    repo_lower = repo_id.lower()
+    if "/mms-tts-" in repo_lower:
+        suffix = repo_lower.rsplit("mms-tts-", 1)[1]
+        if suffix:
+            values.append((suffix, True))
+
     languages: list[str] = []
     for value, explicit_field in values:
         lang = _normalize_language(value, explicit_field=explicit_field)
@@ -1534,6 +1544,16 @@ def _build_discovered_model(listing: dict) -> dict | None:
     total_params = listing["_total_params"]
     config = listing.get("config", {})
     pipeline_tag = listing.get("pipeline_tag") or listing.get("_pipeline_tag")
+
+    # Listings from non-download sort strategies (trending, likes) omit
+    # downloads/likes/tags, which would zero out popularity metadata and
+    # lose language tags. Backfill those fields with a full info fetch.
+    if listing.get("downloads") is None or listing.get("likes") is None:
+        info = fetch_model_info(repo_id)
+        if info:
+            for key in ("downloads", "likes", "createdAt", "tags"):
+                if listing.get(key) is None and info.get(key) is not None:
+                    listing[key] = info[key]
 
     full_config = fetch_config_json(repo_id)
 
@@ -2816,6 +2836,12 @@ def main():
                             fresh_model["license"] = old_model["license"]
                         if old_model.get("gguf_sources") and not fresh_model.get("gguf_sources"):
                             fresh_model["gguf_sources"] = old_model["gguf_sources"]
+                        # Fallback stubs and trending listings carry no
+                        # popularity/date/language metadata — never let them
+                        # clobber real values from a previous scrape.
+                        for key in ("hf_downloads", "hf_likes", "release_date", "languages"):
+                            if old_model.get(key) and not fresh_model.get(key):
+                                fresh_model[key] = old_model[key]
                         updated_count += 1
                     elif name:
                         # Historical model not in current scrape — keep it
