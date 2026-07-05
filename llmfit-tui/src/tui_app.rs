@@ -4,7 +4,7 @@ use llmfit_core::models::{Capability, ModelDatabase, UseCase};
 use llmfit_core::plan::{PlanEstimate, PlanRequest, estimate_model_plan};
 use llmfit_core::providers::{
     self, DockerModelRunnerProvider, LlamaCppProvider, LmStudioProvider, MlxProvider,
-    ModelProvider, OllamaProvider, PullEvent, PullHandle, VllmProvider,
+    ModelProvider, OllamaProvider, PullEvent, PullHandle, VllmProvider, command_exists,
 };
 use llmfit_core::quality;
 
@@ -4314,16 +4314,6 @@ impl App {
             }
         }
     }
-}
-
-fn command_exists(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
 }
 
 #[cfg(test)]

@@ -1343,6 +1343,13 @@ pub fn llamacpp_models_dir() -> PathBuf {
     }
 }
 
+/// Check whether a binary is available on the system PATH.
+/// Cross-platform: uses the `which` crate rather than shelling out to a
+/// Unix-only `which` command, so it works on Windows too.
+pub fn command_exists(name: &str) -> bool {
+    which::which(name).is_ok()
+}
+
 /// Find a binary by checking `LLAMA_CPP_PATH` env var, common install
 /// locations, and finally the system PATH via `which`.
 fn find_binary(name: &str) -> Option<String> {
