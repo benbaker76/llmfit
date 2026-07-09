@@ -17,7 +17,7 @@
   <a href="https://about.signpath.io"><img src="https://img.shields.io/badge/SignPath-signed-brightgreen?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgZmlsbD0id2hpdGUiIHZpZXdCb3g9IjAgMCAxNiAxNiI+PHBhdGggZD0iTTEwLjA2NyA0LjU2N2wtNC43MzQgNC43MzMtMS40LTEuNGExIDEgMCAwIDAtMS40MTQgMS40MTRsMi4xIDIuMWExIDEgMCAwIDAgMS40MTQgMGw1LjQ0LTUuNDRhMSAxIDAgMCAwLTEuNDE0LTEuNDE0eiIvPjwvc3ZnPg==" alt="SignPath で署名済み"></a>
 </p>
 
-> **新機能: [コミュニティリーダーボード](#コミュニティリーダーボード-b)** — 実際のユーザーから集まった実環境のパフォーマンスデータを閲覧できます。`b` を押すと、自分のものに限らず、あらゆる GPU の実測 tok/s、TTFT、VRAM を確認できます。`H` で 27 種類以上のハードウェアプリセット（RTX 5090 から Apple M1 まで）から選び、購入や自作の前に実数値を比較しましょう。
+> **🎉 [llmfit 1.0 リリース](https://github.com/AlexsJones/llmfit/releases/tag/v1.0.0) — すべての数値が検証可能になったマイルストーンリリース。** マシンのメモリ帯域幅は仮定値ではなく*実測*になりました。あなたの GPU のコミュニティ実測データ（`✓` マーク付き）がある場合は、数式による推定より優先して表示されます。そして、すべての推定値はその根拠を開示します — `llmfit info` で数値の前提条件と、自分のマシンで検証する方法を確認できます。[詳しくはこちら →](https://github.com/AlexsJones/llmfit/discussions/708)
 
 **数百のモデルとプロバイダー。自分のハードウェアで動くものを見つけるコマンドはひとつ。**
 

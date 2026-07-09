@@ -17,7 +17,7 @@
   <a href="https://about.signpath.io"><img src="https://img.shields.io/badge/SignPath-signed-brightgreen?logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNiIgaGVpZ2h0PSIxNiIgZmlsbD0id2hpdGUiIHZpZXdCb3g9IjAgMCAxNiAxNiI+PHBhdGggZD0iTTEwLjA2NyA0LjU2N2wtNC43MzQgNC43MzMtMS40LTEuNGExIDEgMCAwIDAtMS40MTQgMS40MTRsMi4xIDIuMWExIDEgMCAwIDAgMS40MTQgMGw1LjQ0LTUuNDRhMSAxIDAgMCAwLTEuNDE0LTEuNDE0eiIvPjwvc3ZnPg==" alt="Signed with SignPath"></a>
 </p>
 
-> **新功能：[社区排行榜](#社区排行榜-b)** — 浏览真实用户的实际性能数据。按 `b` 键查看任意 GPU（不仅限于你的设备）实测的 tok/s、TTFT 和 VRAM 数据。从 RTX 5090 到 Apple M1 的 27+ 种硬件预设中进行选择，按 `H` 键在购买或组装硬件前比较真实数据。
+> **🎉 [llmfit 1.0 正式发布](https://github.com/AlexsJones/llmfit/releases/tag/v1.0.0) — 让每个数字都可验证的里程碑版本。** 你的内存带宽现在是*实测*的，而非假设值。当我们拥有你的 GPU 的社区实测数据（标记为 `✓`）时，它将优先于公式估算显示。每个估算值都附带其输入参数 — `llmfit info` 会准确展示数字背后的假设，以及如何亲自验证。[阅读完整故事 →](https://github.com/AlexsJones/llmfit/discussions/708)
 
 **数百种模型与提供商，一条命令即可找出你的硬件能运行哪些模型。**
 
