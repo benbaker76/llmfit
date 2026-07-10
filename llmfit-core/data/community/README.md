@@ -37,6 +37,15 @@ an open benchmark PR, new results are appended to it (instead of opening
 another PR), and a retry after a partial failure skips files that already
 landed rather than duplicating them.
 
+## Validation
+
+Every PR touching this directory runs the **Community Benchmarks** workflow
+(`scripts/validate_community_benchmarks.py`): schema conformance against
+[`schema.json`](./schema.json), path/naming conventions, and cross-field
+sanity checks (tps ordering, plausible hardware bounds, submission
+timestamps). Hand-crafted submissions are welcome as long as they pass the
+same checks the generated ones do.
+
 ## Format
 
 Each file conforms to [`schema.json`](./schema.json). Example:
