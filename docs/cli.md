@@ -159,9 +159,11 @@ local store, so retrying after a partial failure skips anything that already
 landed. Nothing is submitted until you confirm, and `--dry-run` never touches
 the network.
 
-> Interactive login requires `LLMFIT_GH_CLIENT_ID` to be set to a registered
-> GitHub OAuth App client id. Until one is configured, use a `GITHUB_TOKEN` /
-> `GH_TOKEN` with `public_repo` scope.
+> Interactive login ships enabled — the public OAuth App client id is baked
+> into the binary (the device flow needs no client secret, so this is safe by
+> design). `LLMFIT_GH_CLIENT_ID` overrides it (e.g. when running a fork
+> against your own OAuth App); set it to an empty string to disable
+> interactive login entirely and rely on `GITHUB_TOKEN` / `GH_TOKEN`.
 
 ### Hardware overrides
 

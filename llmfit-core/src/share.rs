@@ -36,11 +36,12 @@ const SCHEMA_VERSION: u32 = 1;
 const USER_AGENT: &str = concat!("llmfit/", env!("CARGO_PKG_VERSION"));
 const API: &str = "https://api.github.com";
 
-/// Public OAuth App client id used for the device flow. This is **not** a
-/// secret (device flow requires no client secret) and is safe to ship. Until
-/// the real OAuth App is registered, override it with the `LLMFIT_GH_CLIENT_ID`
-/// environment variable.
-const DEFAULT_CLIENT_ID: &str = "REPLACE_WITH_OAUTH_APP_CLIENT_ID";
+/// Public OAuth App client id used for the device flow (the "llmfit" OAuth
+/// App, device flow enabled). This is **not** a secret — the device flow
+/// requires no client secret, so shipping it in the binary is by design.
+/// Override with the `LLMFIT_GH_CLIENT_ID` environment variable (e.g. when
+/// running a fork against a different OAuth App).
+const DEFAULT_CLIENT_ID: &str = "Ov23lirCd460lRfnbKyK";
 
 /// Options controlling a `bench --share` invocation.
 pub struct ShareOptions {
@@ -704,11 +705,16 @@ pub fn preflight_auth() -> Result<String, String> {
     Ok(token)
 }
 
-/// The OAuth App client id for the device flow, or `None` when only the
-/// unregistered placeholder is available (interactive login not possible).
+/// The OAuth App client id for the device flow: the `LLMFIT_GH_CLIENT_ID`
+/// env override when set, otherwise the shipped default. `None` only when
+/// the override is explicitly set to an empty string (opt-out of
+/// interactive login, e.g. in restricted CI).
 pub fn oauth_client_id() -> Option<String> {
-    let id = std::env::var("LLMFIT_GH_CLIENT_ID").unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string());
-    (id != DEFAULT_CLIENT_ID).then_some(id)
+    let id = std::env::var("LLMFIT_GH_CLIENT_ID")
+        .unwrap_or_else(|_| DEFAULT_CLIENT_ID.to_string())
+        .trim()
+        .to_string();
+    (!id.is_empty()).then_some(id)
 }
 
 /// Persist a token obtained via the device flow for future runs.
