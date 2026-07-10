@@ -13,6 +13,11 @@ const BASE_URL: &str = "https://localmaxxing.com/api";
 // Embedded benchmark cache — scraped by scripts/scrape_benchmarks.py
 const BENCHMARK_CACHE_JSON: &str = include_str!("../data/benchmark_cache.json");
 
+// Community submissions contributed via `llmfit bench --share`, aggregated
+// from data/community/ by build.rs. Merged submission → next release ships it.
+const COMMUNITY_BENCH_JSON: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/community_benchmarks.json"));
+
 // ── Response types ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,14 +374,19 @@ pub fn cached_preset_labels() -> Vec<&'static str> {
 
 // ── Measured throughput lookup (provenance-weighted estimates) ──────
 
-/// Where a measured throughput came from. The user's own benchmark runs
-/// outrank community medians, which outrank the formula estimate.
+/// Where a measured throughput came from. Priority when annotating fits:
+/// your own runs on this machine, then llmfit community submissions recorded
+/// on identical hardware, then localmaxxing medians on matching presets —
+/// all of which outrank the formula estimate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MeasuredSource {
-    /// Community leaderboard runs on hardware matching the detected GPU.
+    /// localmaxxing.com leaderboard runs on hardware matching the detected GPU.
     #[default]
     Community,
+    /// `llmfit bench --share` submissions merged into the llmfit repo,
+    /// recorded on hardware identical to this machine's.
+    CommunityLlmfit,
     /// `llmfit bench` runs recorded in this machine's local store.
     LocalBench,
 }
@@ -497,6 +507,117 @@ pub fn measured_tps_for(
     quant: &str,
 ) -> Option<MeasuredTps> {
     MeasuredTpsIndex::for_specs(specs)?.lookup(model_hf_id, quant)
+}
+
+// ── Embedded llmfit community submissions ───────────────────────────
+
+/// All community benchmark submissions embedded at build time (see
+/// build.rs). Each element is a full submission payload conforming to
+/// `data/community/schema.json`.
+pub fn community_submissions() -> &'static [serde_json::Value] {
+    static CACHE: OnceLock<Vec<serde_json::Value>> = OnceLock::new();
+    CACHE.get_or_init(|| serde_json::from_str(COMMUNITY_BENCH_JSON).unwrap_or_default())
+}
+
+/// Whether a submission's recorded `hardware` object matches `specs` (same
+/// CPU and GPU name). Shared by the local store and the embedded community
+/// data: measurements only transfer between identical configurations.
+pub fn hardware_payload_matches(hw: &serde_json::Value, specs: &SystemSpecs) -> bool {
+    let cpu_ok = hw["cpu"]
+        .as_str()
+        .is_some_and(|c| c.eq_ignore_ascii_case(&specs.cpu_name));
+    let gpu_ok = match (&specs.gpu_name, hw["hardwareName"].as_str()) {
+        (Some(now), Some(then)) => now.eq_ignore_ascii_case(then),
+        (None, None) => true,
+        _ => false,
+    };
+    cpu_ok && gpu_ok
+}
+
+/// One benchmark result from a community submission, for leaderboard display.
+#[derive(Debug, Clone)]
+pub struct CommunityResult {
+    pub model: String,
+    pub provider: String,
+    pub avg_tps: f64,
+    pub ttft_ms: Option<f64>,
+}
+
+/// Community results recorded on hardware matching `specs`, newest
+/// submission first.
+pub fn community_results_for_specs(specs: &SystemSpecs) -> Vec<CommunityResult> {
+    let mut subs: Vec<&serde_json::Value> = community_submissions()
+        .iter()
+        .filter(|s| hardware_payload_matches(&s["hardware"], specs))
+        .collect();
+    subs.sort_by_key(|s| std::cmp::Reverse(s["submittedAtUnix"].as_u64().unwrap_or(0)));
+
+    let mut out = Vec::new();
+    for s in subs {
+        for r in s["results"]
+            .as_array()
+            .map(|v| v.as_slice())
+            .unwrap_or_default()
+        {
+            let Some(tps) = r["avgTps"].as_f64().filter(|t| *t > 0.0) else {
+                continue;
+            };
+            out.push(CommunityResult {
+                model: r["model"].as_str().unwrap_or("?").to_string(),
+                provider: r["provider"].as_str().unwrap_or("").to_string(),
+                avg_tps: tps,
+                ttft_ms: r["avgTtftMs"].as_f64(),
+            });
+        }
+    }
+    out
+}
+
+/// Index of embedded community submissions recorded on hardware identical to
+/// the detected machine, for annotating fit rows. Sits between the user's
+/// own local runs and localmaxxing preset medians in trust order — and gives
+/// a fresh install measured numbers (and calibration anchors) from day one
+/// when someone already contributed on the same hardware.
+pub struct CommunityBenchIndex {
+    /// (provider model tag, tok/s), newest submission first.
+    entries: Vec<(String, f64)>,
+}
+
+impl CommunityBenchIndex {
+    pub fn for_specs(specs: &SystemSpecs) -> Option<Self> {
+        let entries: Vec<(String, f64)> = community_results_for_specs(specs)
+            .into_iter()
+            .map(|r| (r.model, r.avg_tps))
+            .collect();
+        (!entries.is_empty()).then_some(Self { entries })
+    }
+
+    /// Median community-measured tok/s for a catalog model, resolved through
+    /// the same tag-matching heuristics as installed detection.
+    pub fn lookup(&self, model_hf_name: &str) -> Option<MeasuredTps> {
+        let mut matches: Vec<f64> = self
+            .entries
+            .iter()
+            .filter(|(tag, _)| crate::providers::tag_matches_model(tag, model_hf_name))
+            .map(|(_, tps)| *tps)
+            .collect();
+        if matches.is_empty() {
+            return None;
+        }
+        matches.sort_by(|a, b| a.partial_cmp(b).expect("tok/s values are finite"));
+        let n = matches.len();
+        let median = if n % 2 == 1 {
+            matches[n / 2]
+        } else {
+            (matches[n / 2 - 1] + matches[n / 2]) / 2.0
+        };
+        Some(MeasuredTps {
+            tok_s: median,
+            sample_count: n as u32,
+            hardware_label: "identical hardware".to_string(),
+            source: MeasuredSource::CommunityLlmfit,
+        })
+    }
 }
 
 // ── Fetch functions ──────────────────────────────────────────────────
@@ -835,6 +956,83 @@ mod tests {
 
     fn row(json: &str) -> LeaderboardEntry {
         serde_json::from_str(json).expect("valid test row")
+    }
+
+    fn specs(cpu: &str, gpu: Option<&str>) -> SystemSpecs {
+        SystemSpecs {
+            total_ram_gb: 32.0,
+            available_ram_gb: 24.0,
+            total_cpu_cores: 8,
+            cpu_name: cpu.to_string(),
+            has_gpu: gpu.is_some(),
+            gpu_vram_gb: None,
+            total_gpu_vram_gb: None,
+            gpu_name: gpu.map(str::to_string),
+            gpu_count: u32::from(gpu.is_some()),
+            unified_memory: false,
+            backend: GpuBackend::CpuX86,
+            gpus: vec![],
+            cluster_mode: false,
+            cluster_node_count: 0,
+        }
+    }
+
+    #[test]
+    fn community_embed_parses_and_is_seeded() {
+        let subs = community_submissions();
+        // data/community/ ships with at least the first genuine submission;
+        // this breaks if build.rs stops aggregating it into the binary.
+        assert!(!subs.is_empty(), "embedded community aggregate is empty");
+        for s in subs {
+            assert_eq!(s["schemaVersion"], 1, "unexpected submission shape");
+            assert!(s["results"].as_array().is_some_and(|r| !r.is_empty()));
+            assert!(s["hardware"]["cpu"].is_string());
+        }
+    }
+
+    #[test]
+    fn community_results_filter_by_hardware() {
+        // The seeded submission was recorded on this exact configuration.
+        let seeded = specs(
+            "Intel(R) Core(TM) Ultra 7 258V",
+            Some("Intel Arc Graphics 130V/140V (integrated)"),
+        );
+        let rows = community_results_for_specs(&seeded);
+        assert!(!rows.is_empty());
+        assert!(rows.iter().all(|r| r.avg_tps > 0.0));
+
+        // A different machine gets nothing.
+        let other = specs("AMD Ryzen 9 7950X", Some("NVIDIA GeForce RTX 4090"));
+        assert!(community_results_for_specs(&other).is_empty());
+    }
+
+    #[test]
+    fn hardware_payload_matching_rules() {
+        use serde_json::json;
+        let hw = json!({"cpu": "Test CPU", "hardwareName": "Test GPU"});
+        assert!(hardware_payload_matches(
+            &hw,
+            &specs("Test CPU", Some("Test GPU"))
+        ));
+        assert!(hardware_payload_matches(
+            &hw,
+            &specs("test cpu", Some("test gpu"))
+        ));
+        assert!(!hardware_payload_matches(&hw, &specs("Test CPU", None)));
+        assert!(!hardware_payload_matches(
+            &hw,
+            &specs("Other CPU", Some("Test GPU"))
+        ));
+
+        let cpu_only = json!({"cpu": "Test CPU", "hardwareName": null});
+        assert!(hardware_payload_matches(
+            &cpu_only,
+            &specs("Test CPU", None)
+        ));
+        assert!(!hardware_payload_matches(
+            &cpu_only,
+            &specs("Test CPU", Some("Test GPU"))
+        ));
     }
 
     #[test]

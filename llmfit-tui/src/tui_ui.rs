@@ -4405,11 +4405,19 @@ fn draw_benchmarks(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColor
         .iter()
         .filter(|e| e.id.starts_with("local:"))
         .count();
-    let counts = if local_count > 0 {
-        format!("  ({} results, {} yours)", app.bench_total, local_count)
-    } else {
-        format!("  ({} results)", app.bench_total)
-    };
+    let community_count = app
+        .bench_entries
+        .iter()
+        .filter(|e| e.id.starts_with("community:"))
+        .count();
+    let mut counts = format!("  ({} results", app.bench_total);
+    if local_count > 0 {
+        counts.push_str(&format!(", {} yours", local_count));
+    }
+    if community_count > 0 {
+        counts.push_str(&format!(", {} llmfit community", community_count));
+    }
+    counts.push(')');
     let mut summary_spans = vec![
         Span::styled("  Hardware: ", Style::default().fg(tc.muted)),
         Span::styled(&hw_desc, Style::default().fg(tc.fg).bold()),
@@ -4489,6 +4497,7 @@ fn draw_benchmarks(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColor
                 .unwrap_or_default();
 
             let is_local = entry.id.starts_with("local:");
+            let is_community = entry.id.starts_with("community:");
             let verified_marker = if entry.verified() { " *" } else { "" };
             let user = format!("{}{}", entry.username(), verified_marker);
 
@@ -4513,6 +4522,10 @@ fn draw_benchmarks(frame: &mut Frame, app: &mut App, area: Rect, tc: &ThemeColor
                 if is_local {
                     // Your own stored results, pinned above the fetched board.
                     Cell::from(user).style(Style::default().fg(tc.accent))
+                } else if is_community {
+                    // Repo-contributed runs on identical hardware, shipped
+                    // inside this build.
+                    Cell::from(user).style(Style::default().fg(tc.info))
                 } else {
                     Cell::from(user)
                 },

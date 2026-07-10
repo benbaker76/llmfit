@@ -247,16 +247,7 @@ impl StoredBenchmark {
     /// and GPU). Measurements from a previous machine configuration must not
     /// override or calibrate estimates for the current one.
     pub fn matches_hardware(&self, specs: &SystemSpecs) -> bool {
-        let hw = &self.payload["hardware"];
-        let cpu_ok = hw["cpu"]
-            .as_str()
-            .is_some_and(|c| c.eq_ignore_ascii_case(&specs.cpu_name));
-        let gpu_ok = match (&specs.gpu_name, hw["hardwareName"].as_str()) {
-            (Some(now), Some(then)) => now.eq_ignore_ascii_case(then),
-            (None, None) => true,
-            _ => false,
-        };
-        cpu_ok && gpu_ok
+        crate::benchmarks::hardware_payload_matches(&self.payload["hardware"], specs)
     }
 
     /// One line per benchmark result: `model via provider — N tok/s`.

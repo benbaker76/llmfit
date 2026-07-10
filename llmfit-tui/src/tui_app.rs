@@ -1175,9 +1175,11 @@ impl App {
             .count();
 
         // Only analyze models that can actually run on this hardware.
-        let measured_index = llmfit_core::benchmarks::MeasuredTpsIndex::for_specs(&specs);
-        // The user's own `llmfit bench` runs trump community medians.
+        // Measured sources, most trustworthy first: your own runs, llmfit
+        // community submissions on identical hardware, localmaxxing presets.
         let local_index = llmfit_core::share::LocalBenchIndex::load(&specs);
+        let community_index = llmfit_core::benchmarks::CommunityBenchIndex::for_specs(&specs);
+        let measured_index = llmfit_core::benchmarks::MeasuredTpsIndex::for_specs(&specs);
         let mut all_fits: Vec<ModelFit> = db
             .get_all_models()
             .iter()
@@ -1188,6 +1190,7 @@ impl App {
                 fit.measured_tps = local_index
                     .as_ref()
                     .and_then(|idx| idx.lookup(&m.name))
+                    .or_else(|| community_index.as_ref().and_then(|idx| idx.lookup(&m.name)))
                     .or_else(|| {
                         measured_index
                             .as_ref()
@@ -2518,18 +2521,59 @@ impl App {
         llmfit_core::analysis::apply_local_calibration(&mut self.all_fits);
     }
 
-    /// Rebuild the "your local results" rows pinned at the top of the
-    /// leaderboard: stored submissions (pending and already shared) rendered
-    /// as `local:`-prefixed entries attributed to "you". Skipped while
-    /// browsing a hardware preset other than this machine.
+    /// Rebuild the rows pinned at the top of the leaderboard: your stored
+    /// runs (`local:` ids, "you (local)/(shared)") and llmfit community
+    /// submissions recorded on identical hardware (`community:` ids,
+    /// "llmfit community"). Skipped while browsing a hardware preset other
+    /// than this machine.
     pub fn merge_local_bench_rows(&mut self) {
         use llmfit_core::benchmarks::{
             LeaderboardEngine, LeaderboardEntry, LeaderboardModel, LeaderboardUser,
         };
 
-        self.bench_entries.retain(|e| !e.id.starts_with("local:"));
+        self.bench_entries
+            .retain(|e| !e.id.starts_with("local:") && !e.id.starts_with("community:"));
         if self.bench_hw_label.is_some() {
             return;
+        }
+
+        fn pinned_row(
+            id: String,
+            who: &str,
+            model: &str,
+            provider: &str,
+            tps: Option<f64>,
+            ttft: Option<f64>,
+        ) -> LeaderboardEntry {
+            LeaderboardEntry {
+                id,
+                tok_s_out: tps,
+                tok_s_total: None,
+                ttft_ms: ttft,
+                context_length: None,
+                batch_size: None,
+                peak_vram_gb: None,
+                notes: None,
+                model: Some(LeaderboardModel {
+                    hf_id: model.to_string(),
+                    display_name: None,
+                    family: None,
+                    params: None,
+                    is_mo_e: None,
+                }),
+                hardware: None,
+                engine: Some(LeaderboardEngine {
+                    engine_name: provider.to_string(),
+                    engine_version: None,
+                    quantization: String::new(),
+                    backend: None,
+                }),
+                engine_flags: None,
+                user: Some(LeaderboardUser {
+                    username: Some(who.to_string()),
+                    verified: None,
+                }),
+            }
         }
 
         let mut local: Vec<LeaderboardEntry> = Vec::new();
@@ -2543,43 +2587,45 @@ impl App {
                     continue;
                 };
                 for (i, r) in results.iter().enumerate() {
-                    local.push(LeaderboardEntry {
-                        id: format!("local:{}:{i}", s.path.display()),
-                        tok_s_out: r["avgTps"].as_f64(),
-                        tok_s_total: None,
-                        ttft_ms: r["avgTtftMs"].as_f64(),
-                        context_length: None,
-                        batch_size: None,
-                        peak_vram_gb: None,
-                        notes: None,
-                        model: Some(LeaderboardModel {
-                            hf_id: r["model"].as_str().unwrap_or("?").to_string(),
-                            display_name: None,
-                            family: None,
-                            params: None,
-                            is_mo_e: None,
-                        }),
-                        hardware: None,
-                        engine: Some(LeaderboardEngine {
-                            engine_name: r["provider"].as_str().unwrap_or("").to_string(),
-                            engine_version: None,
-                            quantization: String::new(),
-                            backend: None,
-                        }),
-                        engine_flags: None,
-                        user: Some(LeaderboardUser {
-                            username: Some((*who).to_string()),
-                            verified: None,
-                        }),
-                    });
+                    local.push(pinned_row(
+                        format!("local:{}:{i}", s.path.display()),
+                        who,
+                        r["model"].as_str().unwrap_or("?"),
+                        r["provider"].as_str().unwrap_or(""),
+                        r["avgTps"].as_f64(),
+                        r["avgTtftMs"].as_f64(),
+                    ));
                 }
             }
         }
+        // Newest first, pinned above the fetched leaderboard.
+        local.reverse();
+
+        // Embedded community submissions on identical hardware — below your
+        // own rows. Your shared runs also live in the embedded data, so skip
+        // community entries that duplicate a local row (same model + tok/s).
+        let is_dup = |model: &str, tps: f64, rows: &[LeaderboardEntry]| {
+            rows.iter()
+                .any(|e| e.hf_id() == model && e.tok_s_out.is_some_and(|t| (t - tps).abs() < 0.005))
+        };
+        let community = llmfit_core::benchmarks::community_results_for_specs(&self.specs);
+        for (i, r) in community.iter().enumerate() {
+            if is_dup(&r.model, r.avg_tps, &local) {
+                continue;
+            }
+            local.push(pinned_row(
+                format!("community:{i}"),
+                "llmfit community",
+                &r.model,
+                &r.provider,
+                Some(r.avg_tps),
+                r.ttft_ms,
+            ));
+        }
+
         if local.is_empty() {
             return;
         }
-        // Newest first, pinned above the fetched leaderboard.
-        local.reverse();
         local.append(&mut self.bench_entries);
         self.bench_entries = local;
         if self.bench_cursor >= self.bench_entries.len() {

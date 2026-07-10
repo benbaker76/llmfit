@@ -150,7 +150,8 @@ pub fn display_model_fits(fits: &[ModelFit]) {
     );
     if fits.iter().any(|f| f.measured_tps.is_some()) {
         println!(
-            "  ✓ = measured by the community on hardware matching yours (localmaxxing.com), not an estimate."
+            "  ✓ = measured, not estimated: your own benchmarks, llmfit community submissions \
+             on identical hardware, or localmaxxing.com data for matching hardware."
         );
     }
 }
@@ -563,6 +564,17 @@ fn display_estimate_basis(fit: &ModelFit) {
                 );
                 println!("  Your measurement — trust this over the formula estimate below.");
             }
+            llmfit_core::benchmarks::MeasuredSource::CommunityLlmfit => {
+                println!("{}", "Measured on Identical Hardware:".bold().underline());
+                println!(
+                    "  {:.1} tok/s median across {} llmfit community submission(s) \
+                     (`llmfit bench --share`)",
+                    m.tok_s, m.sample_count
+                );
+                println!(
+                    "  Real runs on your exact hardware — trust this over the estimate below."
+                );
+            }
             llmfit_core::benchmarks::MeasuredSource::Community => {
                 println!("{}", "Measured on Matching Hardware:".bold().underline());
                 println!(
@@ -578,7 +590,8 @@ fn display_estimate_basis(fit: &ModelFit) {
     println!("{}", "Estimate Basis:".bold().underline());
     if let Some(c) = basis.local_calibration {
         println!(
-            "  Calibrated x{:.2} from your own `llmfit bench` run(s) on this machine",
+            "  Calibrated x{:.2} from benchmark run(s) on this exact hardware \
+             (yours and/or the llmfit community's)",
             c
         );
     }

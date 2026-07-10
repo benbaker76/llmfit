@@ -134,6 +134,14 @@ TUI — offers to contribute **all** stored benchmarks in a single PR; uploaded
 files move to `.../benchmarks/shared/` so they are kept as history but never
 submitted twice.
 
+**Merged submissions ship in the next release.** Community files are embedded
+into the binary at build time, so anyone on identical hardware (same CPU +
+GPU) sees them on the benchmark page as `llmfit community` rows, gets
+measured ✓ tok/s for those models, and gets calibrated estimates everywhere
+else — a fresh install benefits before its user ever runs a benchmark. Trust
+order everywhere: your own runs > llmfit community on identical hardware >
+localmaxxing medians on matching presets > formula estimate.
+
 Authentication uses the GitHub **device flow** (the same mechanism
 `gh auth login` uses): llmfit prints a short code and a URL, you approve it in
 your browser once, and the token is cached under `~/.config/llmfit/` for next

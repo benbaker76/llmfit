@@ -37,6 +37,18 @@ an open benchmark PR, new results are appended to it (instead of opening
 another PR), and a retry after a partial failure skips files that already
 landed rather than duplicating them.
 
+## What happens after merge
+
+Submissions are aggregated by `llmfit-core/build.rs` and **embedded into the
+binary**, so every merged submission ships in the next release. Users on
+identical hardware (same CPU + GPU) then get:
+
+- your runs on their **benchmark page**, attributed `llmfit community`
+- **measured ✓ tok/s** in the fit table for the models you benched
+  (below their own local runs, above localmaxxing medians and estimates)
+- **calibrated estimates** for every other model, anchored on your runs —
+  a fresh install benefits before its user ever benchmarks anything
+
 ## Validation
 
 Every PR touching this directory runs the **Community Benchmarks** workflow

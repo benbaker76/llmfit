@@ -147,11 +147,12 @@ pub fn build_model_fits(
 ) -> Vec<ModelFit> {
     use crate::fit::backend_compatible;
 
-    // Community-measured throughput for this hardware, when the detected GPU
-    // matches a benchmark preset (provenance-weighted estimates).
-    let measured_index = crate::benchmarks::MeasuredTpsIndex::for_specs(specs);
-    // The user's own `llmfit bench` runs trump community medians.
+    // Measured-throughput sources, most trustworthy first: the user's own
+    // runs on this machine, llmfit community submissions recorded on
+    // identical hardware, then localmaxxing medians on matching presets.
     let local_index = crate::share::LocalBenchIndex::load(specs);
+    let community_index = crate::benchmarks::CommunityBenchIndex::for_specs(specs);
+    let measured_index = crate::benchmarks::MeasuredTpsIndex::for_specs(specs);
 
     let mut fits: Vec<ModelFit> = db
         .get_all_models()
@@ -164,6 +165,7 @@ pub fn build_model_fits(
             fit.measured_tps = local_index
                 .as_ref()
                 .and_then(|idx| idx.lookup(&m.name))
+                .or_else(|| community_index.as_ref().and_then(|idx| idx.lookup(&m.name)))
                 .or_else(|| {
                     measured_index
                         .as_ref()
@@ -176,13 +178,16 @@ pub fn build_model_fits(
     fits
 }
 
-/// Calibrate formula estimates from the user's own benchmark runs.
+/// Calibrate formula estimates from benchmark runs made on this exact
+/// hardware: the user's own local runs, plus llmfit community submissions
+/// recorded on an identical configuration (so a fresh install benefits the
+/// moment anyone contributed on the same machine class).
 ///
-/// Anchors are fits whose `measured_tps` came from the local store and whose
-/// catalog entry has a trustworthy size (>= 1B params, dense — MoE and tiny
-/// models don't scale like bandwidth-bound dense generation). The median
-/// measured/estimated ratio, clamped to [0.05, 3.0], scales every row's
-/// estimate and is recorded in `estimate_basis.local_calibration`.
+/// Anchors must map to a catalog entry with a trustworthy size (>= 1B
+/// params, dense — MoE and tiny models don't scale like bandwidth-bound
+/// dense generation). The median measured/estimated ratio, clamped to
+/// [0.05, 3.0], scales every row's estimate and is recorded in
+/// `estimate_basis.local_calibration`.
 ///
 /// Idempotent: ratios and scaling always derive from the uncalibrated
 /// estimate, so re-applying after a new bench never compounds.
@@ -201,7 +206,10 @@ pub fn apply_local_calibration(fits: &mut [ModelFit]) {
         .filter(|f| f.model.params_b() >= 1.0 && !f.model.is_moe)
         .filter_map(|f| {
             let m = f.measured_tps.as_ref()?;
-            if m.source != MeasuredSource::LocalBench {
+            if !matches!(
+                m.source,
+                MeasuredSource::LocalBench | MeasuredSource::CommunityLlmfit
+            ) {
                 return None;
             }
             let est = uncalibrated(f);
