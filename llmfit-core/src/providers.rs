@@ -396,36 +396,147 @@ impl ModelProvider for OllamaProvider {
 }
 
 // ---------------------------------------------------------------------------
+// OpenAI-compatible provider helpers
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct OpenAiModelList {
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenAiModel {
+    /// Model id, e.g. "meta-llama/Llama-3.1-8B-Instruct".
+    id: String,
+    /// OpenAI-compatible providers may include an owner string. oMLX uses
+    /// `owned_by: "omlx"`, which lets us disambiguate it from vLLM.
+    owned_by: Option<String>,
+}
+
+fn openai_models_url(base_url: &str) -> String {
+    format!("{}/v1/models", base_url.trim_end_matches('/'))
+}
+
+fn fetch_openai_model_list(
+    base_url: &str,
+    timeout: std::time::Duration,
+) -> Option<OpenAiModelList> {
+    let resp = ureq::get(&openai_models_url(base_url))
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
+        .call()
+        .ok()?;
+    resp.into_body().read_json::<OpenAiModelList>().ok()
+}
+
+fn openai_model_list_is_omlx(list: &OpenAiModelList) -> bool {
+    list.data.iter().any(|model| {
+        model
+            .owned_by
+            .as_deref()
+            .is_some_and(|owner| owner.eq_ignore_ascii_case("omlx"))
+    })
+}
+
+fn openai_model_ids(list: &OpenAiModelList) -> impl Iterator<Item = &str> {
+    list.data.iter().map(|model| model.id.as_str())
+}
+
+fn is_omlx_status_payload(json: &serde_json::Value) -> bool {
+    json.get("status").and_then(|v| v.as_str()) == Some("ok")
+        && json.get("version").and_then(|v| v.as_str()).is_some()
+        && (json.get("models_discovered").is_some()
+            || json.get("model_memory_max").is_some()
+            || json.get("cache_efficiency").is_some())
+}
+
+fn endpoint_has_omlx_status(base_url: &str, timeout: std::time::Duration) -> bool {
+    let url = format!("{}/api/status", base_url.trim_end_matches('/'));
+    let Ok(resp) = ureq::get(&url)
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
+        .call()
+    else {
+        return false;
+    };
+    let Ok(json) = resp.into_body().read_json::<serde_json::Value>() else {
+        return false;
+    };
+    is_omlx_status_payload(&json)
+}
+
+// ---------------------------------------------------------------------------
 // MLX provider (Apple MLX framework via HuggingFace cache)
 // ---------------------------------------------------------------------------
 
+const MLX_DEFAULT_SERVER_URL: &str = "http://localhost:8080";
+const OMLX_DEFAULT_SERVER_URL: &str = "http://127.0.0.1:8000";
+
+struct MlxServerCandidate<'a> {
+    base_url: &'a str,
+    require_omlx_identity: bool,
+}
+
 pub struct MlxProvider {
     server_url: String,
+    server_url_explicit: bool,
 }
 
 impl Default for MlxProvider {
     fn default() -> Self {
-        let server_url = std::env::var("MLX_LM_HOST")
-            .ok()
-            .and_then(|url| {
-                if url.starts_with("http://") || url.starts_with("https://") {
-                    Some(url)
-                } else {
-                    eprintln!(
-                        "Warning: MLX_LM_HOST must start with http:// or https://, ignoring: {}",
-                        url
-                    );
-                    None
-                }
-            })
-            .unwrap_or_else(|| "http://localhost:8080".to_string());
-        Self { server_url }
+        let explicit = std::env::var("MLX_LM_HOST").ok().and_then(|url| {
+            if url.starts_with("http://") || url.starts_with("https://") {
+                Some(url)
+            } else {
+                eprintln!(
+                    "Warning: MLX_LM_HOST must start with http:// or https://, ignoring: {}",
+                    url
+                );
+                None
+            }
+        });
+        let server_url_explicit = explicit.is_some();
+        let server_url = explicit.unwrap_or_else(|| MLX_DEFAULT_SERVER_URL.to_string());
+        Self {
+            server_url,
+            server_url_explicit,
+        }
     }
 }
 
 impl MlxProvider {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn server_candidates(&self) -> Vec<MlxServerCandidate<'_>> {
+        let mut candidates = vec![MlxServerCandidate {
+            base_url: self.server_url.as_str(),
+            require_omlx_identity: false,
+        }];
+        if !self.server_url_explicit && self.server_url != OMLX_DEFAULT_SERVER_URL {
+            candidates.push(MlxServerCandidate {
+                base_url: OMLX_DEFAULT_SERVER_URL,
+                require_omlx_identity: true,
+            });
+        }
+        candidates
+    }
+
+    fn fetch_candidate_models(
+        candidate: &MlxServerCandidate<'_>,
+        timeout: std::time::Duration,
+    ) -> Option<OpenAiModelList> {
+        let has_omlx_status = candidate.require_omlx_identity
+            && endpoint_has_omlx_status(candidate.base_url, timeout);
+        let list = fetch_openai_model_list(candidate.base_url, timeout)?;
+        if candidate.require_omlx_identity && !has_omlx_status && !openai_model_list_is_omlx(&list)
+        {
+            return None;
+        }
+        Some(list)
     }
 
     /// Single-pass startup probe for MLX.
@@ -436,23 +547,15 @@ impl MlxProvider {
             return (false, set);
         }
 
-        let url = format!("{}/v1/models", self.server_url.trim_end_matches('/'));
-        if let Ok(resp) = ureq::get(&url)
-            .config()
-            .timeout_global(Some(std::time::Duration::from_millis(800)))
-            .build()
-            .call()
-        {
-            if let Ok(json) = resp.into_body().read_json::<serde_json::Value>()
-                && let Some(data) = json.get("data").and_then(|d| d.as_array())
+        for candidate in self.server_candidates() {
+            if let Some(list) =
+                Self::fetch_candidate_models(&candidate, std::time::Duration::from_millis(800))
             {
-                for model in data {
-                    if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
-                        set.insert(id.to_lowercase());
-                    }
+                for id in openai_model_ids(&list) {
+                    set.insert(id.to_lowercase());
                 }
+                return (true, set);
             }
-            return (true, set);
         }
 
         (check_mlx_python(), set)
@@ -603,16 +706,12 @@ impl ModelProvider for MlxProvider {
         if !cfg!(target_os = "macos") {
             return false;
         }
-        // Try the MLX server first
-        let url = format!("{}/v1/models", self.server_url.trim_end_matches('/'));
-        if ureq::get(&url)
-            .config()
-            .timeout_global(Some(std::time::Duration::from_secs(2)))
-            .build()
-            .call()
-            .is_ok()
-        {
-            return true;
+        // Try MLX-compatible servers first.
+        for candidate in self.server_candidates() {
+            if Self::fetch_candidate_models(&candidate, std::time::Duration::from_secs(2)).is_some()
+            {
+                return true;
+            }
         }
         // Fall back to checking if mlx_lm is installed
         check_mlx_python()
@@ -623,20 +722,15 @@ impl ModelProvider for MlxProvider {
         if !cfg!(target_os = "macos") {
             return set;
         }
-        // Also try querying the MLX server if running
-        let url = format!("{}/v1/models", self.server_url.trim_end_matches('/'));
-        if let Ok(resp) = ureq::get(&url)
-            .config()
-            .timeout_global(Some(std::time::Duration::from_secs(2)))
-            .build()
-            .call()
-            && let Ok(json) = resp.into_body().read_json::<serde_json::Value>()
-            && let Some(data) = json.get("data").and_then(|d| d.as_array())
-        {
-            for model in data {
-                if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
+        // Also try querying MLX-compatible servers if running.
+        for candidate in self.server_candidates() {
+            if let Some(list) =
+                Self::fetch_candidate_models(&candidate, std::time::Duration::from_secs(2))
+            {
+                for id in openai_model_ids(&list) {
                     set.insert(id.to_lowercase());
                 }
+                break;
             }
         }
         set
@@ -2276,7 +2370,7 @@ impl VllmProvider {
     }
 
     fn models_url(&self) -> String {
-        format!("{}/v1/models", self.base_url.trim_end_matches('/'))
+        openai_models_url(&self.base_url)
     }
 
     /// Single-pass startup probe.
@@ -2292,9 +2386,18 @@ impl VllmProvider {
             return (false, set, 0);
         };
 
-        let Ok(list) = resp.into_body().read_json::<VllmModelList>() else {
+        let Ok(list) = resp.into_body().read_json::<OpenAiModelList>() else {
+            if endpoint_has_omlx_status(&self.base_url, std::time::Duration::from_millis(800)) {
+                return (false, set, 0);
+            }
             return (true, set, 0);
         };
+        if openai_model_list_is_omlx(&list)
+            || (list.data.is_empty()
+                && endpoint_has_omlx_status(&self.base_url, std::time::Duration::from_millis(800)))
+        {
+            return (false, set, 0);
+        }
         let models = list.data;
         let count = models.len();
         for m in models {
@@ -2317,29 +2420,31 @@ impl VllmProvider {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct VllmModelList {
-    data: Vec<VllmModel>,
-}
-
-#[derive(serde::Deserialize)]
-struct VllmModel {
-    /// Model id, e.g. "meta-llama/Llama-3.1-8B-Instruct"
-    id: String,
-}
-
 impl ModelProvider for VllmProvider {
     fn name(&self) -> &str {
         "vLLM"
     }
 
     fn is_available(&self) -> bool {
-        ureq::get(&self.models_url())
+        let Ok(resp) = ureq::get(&self.models_url())
             .config()
             .timeout_global(Some(std::time::Duration::from_secs(2)))
             .build()
             .call()
-            .is_ok()
+        else {
+            return false;
+        };
+        match resp.into_body().read_json::<OpenAiModelList>() {
+            Ok(list) => {
+                !openai_model_list_is_omlx(&list)
+                    && (!list.data.is_empty()
+                        || !endpoint_has_omlx_status(
+                            &self.base_url,
+                            std::time::Duration::from_secs(2),
+                        ))
+            }
+            Err(_) => !endpoint_has_omlx_status(&self.base_url, std::time::Duration::from_secs(2)),
+        }
     }
 
     fn installed_models(&self) -> HashSet<String> {
@@ -4477,6 +4582,82 @@ mod tests {
             normalize_docker_mr_host("ftp://docker.example.com:12434"),
             None
         );
+    }
+
+    // ── OpenAI-compatible identity disambiguation ─────────────────────
+
+    #[test]
+    fn test_omlx_status_payload_detected() {
+        let payload = serde_json::json!({
+            "status": "ok",
+            "version": "0.4.4",
+            "models_discovered": 1,
+            "model_memory_max": 12_649_259_752u64,
+            "cache_efficiency": 0.0
+        });
+
+        assert!(is_omlx_status_payload(&payload));
+    }
+
+    #[test]
+    fn test_omlx_status_payload_rejects_generic_status() {
+        let payload = serde_json::json!({
+            "status": "ok",
+            "version": "1.0.0"
+        });
+
+        assert!(!is_omlx_status_payload(&payload));
+    }
+
+    #[test]
+    fn test_openai_model_list_detects_omlx_owner() {
+        let list: OpenAiModelList = serde_json::from_value(serde_json::json!({
+            "object": "list",
+            "data": [
+                {
+                    "id": "Qwen2.5-0.5B-Instruct-4bit",
+                    "object": "model",
+                    "owned_by": "omlx",
+                    "max_model_len": 32768
+                }
+            ]
+        }))
+        .expect("test payload should parse");
+
+        assert!(openai_model_list_is_omlx(&list));
+    }
+
+    #[test]
+    fn test_openai_model_list_keeps_regular_vllm_available() {
+        let list: OpenAiModelList = serde_json::from_value(serde_json::json!({
+            "object": "list",
+            "data": [
+                {
+                    "id": "meta-llama/Llama-3.1-8B-Instruct",
+                    "object": "model",
+                    "owned_by": "vllm"
+                }
+            ]
+        }))
+        .expect("test payload should parse");
+
+        assert!(!openai_model_list_is_omlx(&list));
+    }
+
+    #[test]
+    fn test_openai_model_list_without_owner_is_not_omlx() {
+        let list: OpenAiModelList = serde_json::from_value(serde_json::json!({
+            "object": "list",
+            "data": [
+                {
+                    "id": "meta-llama/Llama-3.1-8B-Instruct",
+                    "object": "model"
+                }
+            ]
+        }))
+        .expect("test payload should parse");
+
+        assert!(!openai_model_list_is_omlx(&list));
     }
 
     // ── vLLM ──────────────────────────────────────────────────────────
