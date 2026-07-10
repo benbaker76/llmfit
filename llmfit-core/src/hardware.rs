@@ -280,9 +280,9 @@ impl SystemSpecs {
             match dominated {
                 Some(existing) => {
                     // The earlier detection path may know the device but not
-                    // its VRAM (e.g. discrete Intel Arc, where i915/xe expose
-                    // no sysfs VRAM file) — the Vulkan device heap is real
-                    // data, so adopt it rather than dropping it (issue #609).
+                    // its VRAM (e.g. discrete Intel Arc when the sysfs VRAM
+                    // files are absent) — if the Vulkan path ever supplies a
+                    // real value, adopt it rather than dropping it (#609).
                     if !existing.unified_memory
                         && existing.vram_gb.unwrap_or(0.0) == 0.0
                         && vulkan_gpu.vram_gb.unwrap_or(0.0) > 0.0
@@ -1269,16 +1269,20 @@ impl SystemSpecs {
     /// Detect Intel GPUs (integrated or discrete Arc) via lspci, with a sysfs
     /// vendor-ID fallback when lspci is unavailable.
     ///
-    /// Intel's i915/xe drivers do **not** expose `mem_info_vram_total` — that
-    /// sysfs file is amdgpu-specific — so dedicated VRAM for discrete Arc
-    /// cards cannot be read here; it is left as `None` for the Vulkan
-    /// fallback to fill in from the device's memory heap (issue #609).
+    /// Dedicated VRAM for discrete Arc cards is read from sysfs per PCI
+    /// address (issue #609): the `xe` driver exposes per-tile
+    /// `tileN/physical_vram_size_bytes` and i915 exposes
+    /// `drm/cardN/lmem_total_bytes` (`mem_info_vram_total` is amdgpu-only).
     /// Integrated GPUs (always at PCI address 00:02.0 on Intel platforms)
     /// share system RAM and are reported as unified-memory devices with the
     /// full RAM pool, matching the AMD APU and Apple Silicon conventions.
     fn detect_intel_gpus(total_ram_gb: f64) -> Vec<GpuInfo> {
         if let Some(text) = Self::lspci_output() {
-            let gpus = Self::parse_intel_gpus_from_lspci(&text, total_ram_gb);
+            let gpus = Self::parse_intel_gpus_from_lspci(
+                &text,
+                total_ram_gb,
+                Self::intel_dgpu_vram_gb_from_sysfs,
+            );
             if !gpus.is_empty() {
                 return gpus;
             }
@@ -1299,9 +1303,11 @@ impl SystemSpecs {
                 if let Ok(vendor) = std::fs::read_to_string(card_path.join("device/vendor"))
                     && vendor.trim() == "0x8086"
                 {
+                    // Dedicated VRAM (if any) identifies the card as discrete.
+                    let vram_gb = Self::intel_dgpu_vram_gb_from_pci_dir(&card_path.join("device"));
                     return vec![GpuInfo {
                         name: "Intel Graphics".to_string(),
-                        vram_gb: None,
+                        vram_gb,
                         backend: GpuBackend::Sycl,
                         count: 1,
                         unified_memory: false,
@@ -1315,8 +1321,14 @@ impl SystemSpecs {
 
     /// Classify Intel display controllers from `lspci -nnD` output.
     /// Separated from [`Self::detect_intel_gpus`] so real lspci captures can
-    /// be used as regression fixtures.
-    fn parse_intel_gpus_from_lspci(text: &str, total_ram_gb: f64) -> Vec<GpuInfo> {
+    /// be used as regression fixtures; `dgpu_vram_gb` maps a discrete card's
+    /// PCI address to its dedicated VRAM (sysfs in production, a fixture in
+    /// tests).
+    fn parse_intel_gpus_from_lspci(
+        text: &str,
+        total_ram_gb: f64,
+        dgpu_vram_gb: impl Fn(&str) -> Option<f64>,
+    ) -> Vec<GpuInfo> {
         let mut gpus = Vec::new();
         for line in text.lines() {
             let lower = line.to_lowercase();
@@ -1342,7 +1354,7 @@ impl SystemSpecs {
             } else {
                 gpus.push(GpuInfo {
                     name,
-                    vram_gb: None, // filled by the Vulkan fallback when available
+                    vram_gb: dgpu_vram_gb(addr),
                     backend: GpuBackend::Sycl,
                     count: 1,
                     unified_memory: false,
@@ -1350,6 +1362,56 @@ impl SystemSpecs {
             }
         }
         gpus
+    }
+
+    /// Dedicated VRAM of a discrete Intel GPU, from sysfs by PCI address
+    /// (domain-qualified, as printed by `lspci -nnD`, e.g. "0000:03:00.0").
+    fn intel_dgpu_vram_gb_from_sysfs(pci_addr: &str) -> Option<f64> {
+        Self::intel_dgpu_vram_gb_from_pci_dir(
+            &std::path::Path::new("/sys/bus/pci/devices").join(pci_addr),
+        )
+    }
+
+    /// Read a discrete Intel GPU's dedicated VRAM from its sysfs PCI device
+    /// directory. The `xe` driver exposes one `tileN/physical_vram_size_bytes`
+    /// per tile (summed here for multi-tile cards); i915 exposes a single
+    /// `drm/cardN/lmem_total_bytes`. Returns `None` for iGPUs (neither file
+    /// exists) or when the values are unreadable.
+    fn intel_dgpu_vram_gb_from_pci_dir(dev_dir: &std::path::Path) -> Option<f64> {
+        let mut total_bytes: u64 = 0;
+
+        if let Ok(entries) = std::fs::read_dir(dev_dir) {
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let fname = fname.to_string_lossy();
+                if fname.starts_with("tile")
+                    && let Ok(text) =
+                        std::fs::read_to_string(entry.path().join("physical_vram_size_bytes"))
+                    && let Ok(bytes) = text.trim().parse::<u64>()
+                {
+                    total_bytes += bytes;
+                }
+            }
+        }
+
+        if total_bytes == 0
+            && let Ok(entries) = std::fs::read_dir(dev_dir.join("drm"))
+        {
+            for entry in entries.flatten() {
+                let fname = entry.file_name();
+                let fname = fname.to_string_lossy();
+                if fname.starts_with("card")
+                    && !fname.contains('-')
+                    && let Ok(text) = std::fs::read_to_string(entry.path().join("lmem_total_bytes"))
+                    && let Ok(bytes) = text.trim().parse::<u64>()
+                {
+                    total_bytes = bytes;
+                    break;
+                }
+            }
+        }
+
+        (total_bytes > 0).then(|| total_bytes as f64 / 1_073_741_824.0)
     }
 
     /// Extract a readable GPU name from an Intel lspci line, e.g.
@@ -1581,14 +1643,38 @@ impl SystemSpecs {
             if !e_nums.is_empty() && e_nums.iter().any(|n| c_nums.contains(n)) {
                 return true;
             }
-            if (e_lower.contains("(integrated)") && c_nums.is_empty())
-                || (c_lower.contains("(integrated)") && e_nums.is_empty())
+            // Arc Pro cards use 2-digit model numbers ("Pro B70") that the
+            // 3-5 digit extractor drops; compare full letter-prefixed model
+            // tokens (a770, b580, b70) as well.
+            let e_toks = Self::extract_arc_model_tokens(&e_lower);
+            let c_toks = Self::extract_arc_model_tokens(&c_lower);
+            if !e_toks.is_empty() && e_toks.iter().any(|t| c_toks.contains(t)) {
+                return true;
+            }
+            // An integrated entry matches a Vulkan Intel device only when the
+            // latter has no model identifier at all — a two-digit Arc Pro
+            // model ("B70") is a dGPU, not the platform iGPU.
+            if (e_lower.contains("(integrated)") && c_nums.is_empty() && c_toks.is_empty())
+                || (c_lower.contains("(integrated)") && e_nums.is_empty() && e_toks.is_empty())
             {
                 return true;
             }
         }
 
         false
+    }
+
+    /// Extract Intel Arc model tokens — a series letter (A/B/C/D) followed by
+    /// 2-4 digits, e.g. "a770", "b580", "b70" — from a lowercased GPU name.
+    fn extract_arc_model_tokens(name: &str) -> Vec<String> {
+        name.split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|tok| {
+                (3..=5).contains(&tok.len())
+                    && matches!(tok.as_bytes()[0], b'a' | b'b' | b'c' | b'd')
+                    && tok.as_bytes()[1..].iter().all(u8::is_ascii_digit)
+            })
+            .map(str::to_string)
+            .collect()
     }
 
     /// Extract 3-5 digit numeric tokens from a GPU name (e.g. "7600", "6800").
@@ -4137,30 +4223,51 @@ GPU[2]\t\t: GFX Version: \t\tgfx90c
     #[test]
     fn test_parse_intel_igpu_from_lspci_lunar_lake() {
         let text = "0000:00:02.0 VGA compatible controller [0300]: Intel Corporation Core Ultra 200V Series Processors Arc Graphics 130V/140V GPU [8086:64a0] (rev 04)";
-        let gpus = SystemSpecs::parse_intel_gpus_from_lspci(text, 32.0);
+        let gpus = SystemSpecs::parse_intel_gpus_from_lspci(text, 32.0, |_| None);
         assert_eq!(gpus.len(), 1, "{gpus:?}");
         assert_eq!(gpus[0].name, "Intel Arc Graphics 130V/140V (integrated)");
         assert!(gpus[0].unified_memory);
         assert_eq!(gpus[0].vram_gb, Some(32.0));
     }
 
-    // Discrete Arc cards enumerate behind a bridge (nonzero bus). i915/xe
-    // expose no sysfs VRAM file, so VRAM stays None for the Vulkan fallback
-    // to fill in — but the card must be detected and named (issue #609).
+    // Discrete Arc cards enumerate behind a bridge (nonzero bus). Their
+    // dedicated VRAM comes from the sysfs lookup keyed by PCI address; when
+    // the lookup has nothing (e.g. driver not bound), VRAM stays None but the
+    // card must still be detected and named (issue #609).
     #[test]
     fn test_parse_intel_dgpu_from_lspci() {
         let a770 = "0000:03:00.0 VGA compatible controller [0300]: Intel Corporation DG2 [Arc A770] [8086:56a0] (rev 08)";
-        let gpus = SystemSpecs::parse_intel_gpus_from_lspci(a770, 32.0);
+        let gpus = SystemSpecs::parse_intel_gpus_from_lspci(a770, 32.0, |_| None);
         assert_eq!(gpus.len(), 1, "{gpus:?}");
         assert_eq!(gpus[0].name, "Intel Arc A770");
         assert!(!gpus[0].unified_memory);
         assert_eq!(gpus[0].vram_gb, None);
 
         let b70 = "0000:03:00.0 VGA compatible controller [0300]: Intel Corporation Battlemage G21 [Arc Pro B70] [8086:e211]";
-        let gpus = SystemSpecs::parse_intel_gpus_from_lspci(b70, 32.0);
+        let gpus = SystemSpecs::parse_intel_gpus_from_lspci(b70, 32.0, |addr| {
+            assert_eq!(addr, "0000:03:00.0");
+            Some(24.0)
+        });
         assert_eq!(gpus.len(), 1, "{gpus:?}");
         assert_eq!(gpus[0].name, "Intel Arc Pro B70");
         assert!(!gpus[0].unified_memory);
+        assert_eq!(gpus[0].vram_gb, Some(24.0));
+    }
+
+    // Dual-card setup from issue #609: each card gets its own entry with
+    // per-address VRAM, so total_gpu_vram_gb aggregation sees both.
+    #[test]
+    fn test_parse_intel_dual_dgpu_from_lspci() {
+        let text = "\
+0000:03:00.0 VGA compatible controller [0300]: Intel Corporation Battlemage G21 [Arc Pro B70] [8086:e211]
+0000:04:00.0 VGA compatible controller [0300]: Intel Corporation Battlemage G21 [Arc Pro B70] [8086:e211]";
+        let gpus = SystemSpecs::parse_intel_gpus_from_lspci(text, 32.0, |_| Some(24.0));
+        assert_eq!(gpus.len(), 2, "{gpus:?}");
+        for gpu in &gpus {
+            assert_eq!(gpu.name, "Intel Arc Pro B70");
+            assert_eq!(gpu.vram_gb, Some(24.0));
+            assert!(!gpu.unified_memory);
+        }
     }
 
     #[test]
@@ -4168,11 +4275,61 @@ GPU[2]\t\t: GFX Version: \t\tgfx90c
         let text = "\
 0000:00:02.0 VGA compatible controller [0300]: Intel Corporation Raptor Lake-S UHD Graphics [8086:a780] (rev 04)
 0000:03:00.0 VGA compatible controller [0300]: Intel Corporation DG2 [Arc A770] [8086:56a0] (rev 08)";
-        let gpus = SystemSpecs::parse_intel_gpus_from_lspci(text, 64.0);
+        let gpus = SystemSpecs::parse_intel_gpus_from_lspci(text, 64.0, |_| Some(16.0));
         assert_eq!(gpus.len(), 2, "{gpus:?}");
         assert!(gpus[0].unified_memory && gpus[0].name.contains("(integrated)"));
+        assert_eq!(gpus[0].vram_gb, Some(64.0), "iGPU shares the RAM pool");
         assert_eq!(gpus[1].name, "Intel Arc A770");
         assert!(!gpus[1].unified_memory);
+        assert_eq!(gpus[1].vram_gb, Some(16.0));
+    }
+
+    // xe driver sysfs layout: per-tile physical_vram_size_bytes under the PCI
+    // device directory. i915 layout: drm/cardN/lmem_total_bytes. Both must
+    // yield the card's dedicated VRAM; an iGPU-like tree (neither file) must
+    // yield None.
+    #[test]
+    fn test_intel_dgpu_vram_from_sysfs_layouts() {
+        let root = std::env::temp_dir().join(format!(
+            "llmfit-test-intel-sysfs-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+
+        // xe: two tiles of 12 GiB each → 24 GiB total.
+        let xe_dev = root.join("xe/0000:03:00.0");
+        std::fs::create_dir_all(xe_dev.join("tile0")).unwrap();
+        std::fs::create_dir_all(xe_dev.join("tile1")).unwrap();
+        let tile_bytes = (12u64 * 1024 * 1024 * 1024).to_string();
+        std::fs::write(xe_dev.join("tile0/physical_vram_size_bytes"), &tile_bytes).unwrap();
+        std::fs::write(xe_dev.join("tile1/physical_vram_size_bytes"), &tile_bytes).unwrap();
+        assert_eq!(
+            SystemSpecs::intel_dgpu_vram_gb_from_pci_dir(&xe_dev),
+            Some(24.0)
+        );
+
+        // i915 discrete: lmem_total_bytes under the DRM card node.
+        let i915_dev = root.join("i915/0000:03:00.0");
+        std::fs::create_dir_all(i915_dev.join("drm/card1")).unwrap();
+        std::fs::write(
+            i915_dev.join("drm/card1/lmem_total_bytes"),
+            (16u64 * 1024 * 1024 * 1024).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            SystemSpecs::intel_dgpu_vram_gb_from_pci_dir(&i915_dev),
+            Some(16.0)
+        );
+
+        // iGPU: DRM card node exists but no VRAM files anywhere.
+        let igpu_dev = root.join("igpu/0000:00:02.0");
+        std::fs::create_dir_all(igpu_dev.join("drm/card0")).unwrap();
+        assert_eq!(
+            SystemSpecs::intel_dgpu_vram_gb_from_pci_dir(&igpu_dev),
+            None
+        );
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // Mesa/Vulkan reports Intel devices by codename ("(LNL)") — must dedupe
@@ -4191,6 +4348,26 @@ GPU[2]\t\t: GFX Version: \t\tgfx90c
         assert!(SystemSpecs::is_same_gpu_name(
             "Intel Arc A770",
             "Intel(R) Arc(tm) A770 Graphics"
+        ));
+    }
+
+    // Arc Pro cards have 2-digit model numbers ("B70") that the 3-5 digit
+    // extractor drops — the lspci name and the Vulkan/Level Zero name must
+    // still dedupe via letter-prefixed model tokens (issue #609).
+    #[test]
+    fn test_is_same_gpu_name_intel_arc_pro_two_digit_model() {
+        assert!(SystemSpecs::is_same_gpu_name(
+            "Intel Arc Pro B70",
+            "Intel(R) Arc(TM) Pro B70 Graphics"
+        ));
+        assert!(!SystemSpecs::is_same_gpu_name(
+            "Intel Arc Pro B70",
+            "Intel(R) Arc(TM) Pro B60 Graphics"
+        ));
+        // A dGPU with a model token must not be swallowed by an iGPU entry.
+        assert!(!SystemSpecs::is_same_gpu_name(
+            "Intel Arc Graphics 130V/140V (integrated)",
+            "Intel(R) Arc(TM) Pro B70 Graphics"
         ));
     }
 
