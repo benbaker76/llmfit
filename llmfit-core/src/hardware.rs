@@ -2052,6 +2052,9 @@ impl SystemSpecs {
             self.total_gpu_vram_gb = Some(vram_gb * count as f64);
             self.has_gpu = true;
         }
+        // The detected GPU-available cap describes the real host, not the
+        // simulated one; clear it rather than report a stale figure.
+        self.gpu_available_gb = None;
         self
     }
 
@@ -2065,6 +2068,9 @@ impl SystemSpecs {
         if self.unified_memory {
             self.gpu_vram_gb = Some(ram_gb);
             self.total_gpu_vram_gb = Some(ram_gb);
+            // The detected GPU-available cap describes the real host, not the
+            // simulated one; clear it rather than report a stale figure.
+            self.gpu_available_gb = None;
             for gpu in &mut self.gpus {
                 if gpu.unified_memory {
                     gpu.vram_gb = Some(ram_gb);
@@ -2173,32 +2179,17 @@ pub(crate) fn format_unified_memory_line(
 
 /// Query how much unified memory the GPU may wire on Apple Silicon.
 ///
-/// Metal's `recommendedMaxWorkingSetSize` gives the OS-default cap. A user can
-/// override that cap with `sysctl iogpu.wired_limit_mb`; when a non-zero
-/// override is set it is authoritative (Metal's recommendation may not reflect
-/// a manually *raised* limit), so it wins. Returns `None` when no default Metal
-/// device is available. Reported in base-2 GB to match the rest of the display.
+/// Metal's `recommendedMaxWorkingSetSize` reflects the kernel's wired limit,
+/// including a manual `sysctl iogpu.wired_limit_mb` override — verified on an
+/// M3 (16 GB): raising the sysctl to 14000 MiB made Metal report exactly
+/// 14000 MiB — so no separate sysctl read is needed. Returns `None` when no
+/// default Metal device is available. Reported in base-2 GB to match the rest
+/// of the display.
 #[cfg(target_os = "macos")]
 pub(crate) fn detect_gpu_available_gb() -> Option<f64> {
     use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice};
     let device = MTLCreateSystemDefaultDevice()?;
-    let metal_gb = device.recommendedMaxWorkingSetSize() as f64 / (1024.0 * 1024.0 * 1024.0);
-    Some(sysctl_wired_limit_gb().unwrap_or(metal_gb))
-}
-
-/// Read `iogpu.wired_limit_mb`. `Some(gb)` only when a non-zero override is set;
-/// `0` (the default, meaning "no override") and any read failure map to `None`.
-#[cfg(target_os = "macos")]
-fn sysctl_wired_limit_gb() -> Option<f64> {
-    let output = std::process::Command::new("sysctl")
-        .args(["-n", "iogpu.wired_limit_mb"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let mib: f64 = String::from_utf8(output.stdout).ok()?.trim().parse().ok()?;
-    (mib > 0.0).then_some(mib / 1024.0)
+    Some(device.recommendedMaxWorkingSetSize() as f64 / (1024.0 * 1024.0 * 1024.0))
 }
 
 /// Non-macOS platforms have no Metal working-set concept.
@@ -3593,6 +3584,22 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
         assert_eq!(specs.total_gpu_vram_gb, Some(48.0));
     }
 
+    #[test]
+    fn test_gpu_override_clears_gpu_available() {
+        let mut specs = make_specs_with_gpu();
+        specs.gpu_available_gb = Some(11.84);
+        let specs = specs.with_gpu_memory_override(24.0);
+        assert_eq!(specs.gpu_available_gb, None);
+    }
+
+    #[test]
+    fn test_gpu_override_synthetic_gpu_clears_gpu_available() {
+        let mut specs = make_specs_no_gpu();
+        specs.gpu_available_gb = Some(11.84);
+        let specs = specs.with_gpu_memory_override(24.0);
+        assert_eq!(specs.gpu_available_gb, None);
+    }
+
     // ── format_unified_memory_line ───────────────────────────────────
 
     #[test]
@@ -4052,7 +4059,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
             has_gpu: true,
             gpu_vram_gb: Some(36.0),
             total_gpu_vram_gb: Some(36.0),
-            gpu_available_gb: None,
+            gpu_available_gb: Some(27.0),
             gpu_name: Some("Apple M2 Max".to_string()),
             gpu_count: 1,
             unified_memory: true,
@@ -4073,6 +4080,7 @@ GPU id = 1 (NVIDIA GeForce RTX 4090)
         assert_eq!(overridden.gpu_vram_gb, Some(96.0));
         assert_eq!(overridden.total_gpu_vram_gb, Some(96.0));
         assert_eq!(overridden.gpus[0].vram_gb, Some(96.0));
+        assert_eq!(overridden.gpu_available_gb, None);
     }
 
     #[test]
